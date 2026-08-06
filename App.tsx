@@ -9,6 +9,7 @@ import {
   AppState,
   AppStateStatus,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   SafeAreaView,
@@ -21,11 +22,14 @@ import {
 
 const STORAGE_KEY_SESSIONS = 'focushour:sessions:v1';
 const STORAGE_KEY_CONFIG = 'focushour:config:v1';
+const STORAGE_KEY_CYCLE = 'focushour:cycle:v1';
 
 const DEFAULT_FOCUS_MIN = 25;
 const DEFAULT_BREAK_MIN = 5;
+const DEFAULT_LONG_BREAK_MIN = 15;
+const DEFAULT_SESSIONS_UNTIL_LONG_BREAK = 4;
 
-type Mode = 'focus' | 'break';
+type Mode = 'focus' | 'break' | 'longBreak';
 
 type Session = {
   id: string;
@@ -37,6 +41,8 @@ type Session = {
 type Config = {
   focusMin: number;
   breakMin: number;
+  longBreakMin: number;
+  sessionsUntilLongBreak: number;
   themeId: string;
 };
 
@@ -72,7 +78,13 @@ function hexToRgba(hex: string, alpha: number): string {
 
 export default function App() {
   useKeepAwake();
-  const [config, setConfig] = useState<Config>({ focusMin: DEFAULT_FOCUS_MIN, breakMin: DEFAULT_BREAK_MIN, themeId: DEFAULT_THEME_ID });
+  const [config, setConfig] = useState<Config>({
+    focusMin: DEFAULT_FOCUS_MIN,
+    breakMin: DEFAULT_BREAK_MIN,
+    longBreakMin: DEFAULT_LONG_BREAK_MIN,
+    sessionsUntilLongBreak: DEFAULT_SESSIONS_UNTIL_LONG_BREAK,
+    themeId: DEFAULT_THEME_ID,
+  });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [mode, setMode] = useState<Mode>('focus');
@@ -80,6 +92,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [distractions, setDistractions] = useState(0);
+  const [sessionsSinceLongBreak, setSessionsSinceLongBreak] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const targetRef = useRef<number | null>(null);
   const notifIdRef = useRef<string | null>(null);
@@ -88,16 +101,24 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [c, s] = await Promise.all([
+        const [c, s, cyc] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEY_CONFIG),
           AsyncStorage.getItem(STORAGE_KEY_SESSIONS),
+          AsyncStorage.getItem(STORAGE_KEY_CYCLE),
         ]);
-        let cfg: Config = { focusMin: DEFAULT_FOCUS_MIN, breakMin: DEFAULT_BREAK_MIN, themeId: DEFAULT_THEME_ID };
+        let cfg: Config = {
+          focusMin: DEFAULT_FOCUS_MIN,
+          breakMin: DEFAULT_BREAK_MIN,
+          longBreakMin: DEFAULT_LONG_BREAK_MIN,
+          sessionsUntilLongBreak: DEFAULT_SESSIONS_UNTIL_LONG_BREAK,
+          themeId: DEFAULT_THEME_ID,
+        };
         if (c) {
           cfg = { ...cfg, ...JSON.parse(c) };
           setConfig(cfg);
         }
         if (s) setSessions(JSON.parse(s));
+        if (cyc) setSessionsSinceLongBreak(JSON.parse(cyc));
         setRemainingSec(cfg.focusMin * 60);
       } catch (e) {
         console.warn('Load failed', e);
@@ -117,6 +138,11 @@ export default function App() {
     AsyncStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions)).catch(() => {});
   }, [sessions, loaded]);
 
+  useEffect(() => {
+    if (!loaded) return;
+    AsyncStorage.setItem(STORAGE_KEY_CYCLE, JSON.stringify(sessionsSinceLongBreak)).catch(() => {});
+  }, [sessionsSinceLongBreak, loaded]);
+
   // Permission request on mount (notifications)
   useEffect(() => {
     (async () => {
@@ -127,7 +153,13 @@ export default function App() {
     })();
   }, []);
 
-  const totalSec = mode === 'focus' ? config.focusMin * 60 : config.breakMin * 60;
+  const durationFor = useCallback(
+    (m: Mode) =>
+      (m === 'focus' ? config.focusMin : m === 'longBreak' ? config.longBreakMin : config.breakMin) * 60,
+    [config]
+  );
+
+  const totalSec = durationFor(mode);
   const theme = THEMES.find((t) => t.id === config.themeId) ?? THEMES[0];
 
   useEffect(() => {
@@ -173,13 +205,27 @@ export default function App() {
       ].slice(0, 200));
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    const nextMode: Mode = finishedMode === 'focus' ? 'break' : 'focus';
+
+    // Classic Pomodoro cycle: focus -> short break, repeated
+    // `sessionsUntilLongBreak` times, then a long break resets the count.
+    let nextMode: Mode;
+    if (finishedMode === 'focus') {
+      const completedCount = sessionsSinceLongBreak + 1;
+      if (completedCount >= config.sessionsUntilLongBreak) {
+        nextMode = 'longBreak';
+        setSessionsSinceLongBreak(0);
+      } else {
+        nextMode = 'break';
+        setSessionsSinceLongBreak(completedCount);
+      }
+    } else {
+      nextMode = 'focus';
+    }
     setMode(nextMode);
-    const nextSec = (nextMode === 'focus' ? config.focusMin : config.breakMin) * 60;
-    setRemainingSec(nextSec);
+    setRemainingSec(durationFor(nextMode));
     setRunning(false);
     stopTick();
-  }, [mode, totalSec, config, stopTick]);
+  }, [mode, totalSec, config, sessionsSinceLongBreak, durationFor, stopTick]);
 
   const tick = useCallback(() => {
     if (targetRef.current == null) return;
@@ -210,7 +256,12 @@ export default function App() {
       const id = await Notifications.scheduleNotificationAsync({
         content: {
           title: mode === 'focus' ? 'Focus session done' : 'Break done',
-          body: mode === 'focus' ? 'Take a short break.' : 'Back to focus.',
+          body:
+            mode === 'focus'
+              ? sessionsSinceLongBreak + 1 >= config.sessionsUntilLongBreak
+                ? 'Take a longer break.'
+                : 'Take a short break.'
+              : 'Back to focus.',
           sound: 'default',
         },
         trigger: {
@@ -223,7 +274,7 @@ export default function App() {
     } catch (e) {
       // Notifications may not be granted; ignore.
     }
-  }, [running, remainingSec, mode, cancelScheduledNotif, tick]);
+  }, [running, remainingSec, mode, sessionsSinceLongBreak, config, cancelScheduledNotif, tick]);
 
   const pause = useCallback(() => {
     if (!running) return;
@@ -245,10 +296,17 @@ export default function App() {
     stopTick();
     cancelScheduledNotif();
     setRunning(false);
-    const nextMode: Mode = mode === 'focus' ? 'break' : 'focus';
+    // Peek at what completing this session would lead to, without
+    // committing cycle progress — skipping isn't a genuine completion.
+    const nextMode: Mode =
+      mode === 'focus'
+        ? sessionsSinceLongBreak + 1 >= config.sessionsUntilLongBreak
+          ? 'longBreak'
+          : 'break'
+        : 'focus';
     setMode(nextMode);
-    setRemainingSec((nextMode === 'focus' ? config.focusMin : config.breakMin) * 60);
-  }, [mode, config, stopTick, cancelScheduledNotif]);
+    setRemainingSec(durationFor(nextMode));
+  }, [mode, config, sessionsSinceLongBreak, durationFor, stopTick, cancelScheduledNotif]);
 
   useEffect(() => {
     return () => {
@@ -356,7 +414,25 @@ export default function App() {
       </View>
 
       <View style={styles.body}>
-        <Text style={[styles.modeLabel, { color: modeColor }]}>{mode === 'focus' ? 'FOCUS' : 'BREAK'}</Text>
+        <Text style={[styles.modeLabel, { color: modeColor }]}>
+          {mode === 'focus' ? 'FOCUS' : mode === 'longBreak' ? 'LONG BREAK' : 'BREAK'}
+        </Text>
+        <View style={styles.cycleDots}>
+          {Array.from({ length: config.sessionsUntilLongBreak }).map((_, i) => (
+            <View
+              key={i}
+              style={[
+                styles.cycleDot,
+                {
+                  backgroundColor:
+                    i < sessionsSinceLongBreak || mode === 'longBreak'
+                      ? theme.focus
+                      : 'rgba(255,255,255,0.16)',
+                },
+              ]}
+            />
+          ))}
+        </View>
         <Text style={styles.distractionLabel}>
           {mode === 'focus' && running
             ? distractions === 0
@@ -424,7 +500,10 @@ export default function App() {
             setRunning(false);
           }
           setConfig(next);
-          setRemainingSec((mode === 'focus' ? next.focusMin : next.breakMin) * 60);
+          setSessionsSinceLongBreak((prev) => Math.min(prev, next.sessionsUntilLongBreak - 1));
+          const nextTotal =
+            mode === 'focus' ? next.focusMin : mode === 'longBreak' ? next.longBreakMin : next.breakMin;
+          setRemainingSec(nextTotal * 60);
           setSettingsOpen(false);
         }}
         onClose={() => setSettingsOpen(false)}
@@ -588,73 +667,112 @@ function SettingsModal({
 }) {
   const [draft, setDraft] = useState(config);
   const previewTheme = THEMES.find((t) => t.id === draft.themeId) ?? THEMES[0];
+  const translateY = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (visible) setDraft(config);
-  }, [visible, config]);
+    if (visible) {
+      setDraft(config);
+      translateY.setValue(0);
+    }
+  }, [visible, config, translateY]);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+      onPanResponderMove: (_, g) => {
+        if (g.dy > 0) translateY.setValue(g.dy);
+      },
+      onPanResponderRelease: (_, g) => {
+        if (g.dy > 120 || g.vy > 1.1) {
+          Animated.timing(translateY, { toValue: 900, duration: 180, useNativeDriver: true }).start(onClose);
+        } else {
+          Animated.spring(translateY, { toValue: 0, useNativeDriver: true, bounciness: 6 }).start();
+        }
+      },
+    })
+  ).current;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent>
-      <View style={styles.modalBackdrop}>
-        <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>Settings</Text>
-          <ScrollView contentContainerStyle={{ paddingBottom: 8 }}>
-            <Row
-              label="Focus length (min)"
-              value={draft.focusMin}
-              onChange={(v) => setDraft({ ...draft, focusMin: v })}
-              min={1}
-              max={120}
-            />
-            <Row
-              label="Break length (min)"
-              value={draft.breakMin}
-              onChange={(v) => setDraft({ ...draft, breakMin: v })}
-              min={1}
-              max={60}
-            />
-            <Text style={styles.themeSectionLabel}>Theme</Text>
-            <View style={styles.themeRow}>
-              {THEMES.map((t) => {
-                const selected = t.id === draft.themeId;
-                return (
-                  <Pressable
-                    key={t.id}
-                    onPress={() => setDraft({ ...draft, themeId: t.id })}
-                    style={styles.themeSwatchWrap}
-                    hitSlop={4}
-                  >
-                    <View
-                      style={[
-                        styles.themeSwatch,
-                        { backgroundColor: t.focus, borderColor: selected ? t.focus : 'transparent' },
-                      ]}
-                    >
-                      <View style={[styles.themeSwatchHalf, { backgroundColor: t.break }]} />
-                    </View>
-                    <Text style={styles.themeSwatchLabel}>{t.label}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </ScrollView>
-          <View style={styles.modalActions}>
-            <Pressable onPress={onClose} style={({ pressed }) => [styles.modalBtn, pressed && styles.modalBtnPressed]}>
-              <Text style={styles.modalBtnText}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => onSave(draft)}
-              style={({ pressed }) => [
-                styles.modalBtn,
-                { backgroundColor: previewTheme.focus },
-                pressed && { opacity: 0.85 },
-              ]}
-            >
-              <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>Save</Text>
-            </Pressable>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Animated.View style={[styles.modalCard, { transform: [{ translateY }] }]}>
+          <View {...panResponder.panHandlers} style={styles.grabberWrap}>
+            <View style={styles.grabber} />
           </View>
-        </View>
-      </View>
+          <View onStartShouldSetResponder={() => true}>
+            <Text style={styles.modalTitle}>Settings</Text>
+            <ScrollView contentContainerStyle={{ paddingBottom: 8 }}>
+              <Row
+                label="Focus length (min)"
+                value={draft.focusMin}
+                onChange={(v) => setDraft({ ...draft, focusMin: v })}
+                min={1}
+                max={120}
+              />
+              <Row
+                label="Break length (min)"
+                value={draft.breakMin}
+                onChange={(v) => setDraft({ ...draft, breakMin: v })}
+                min={1}
+                max={60}
+              />
+              <Row
+                label="Sessions until long break"
+                value={draft.sessionsUntilLongBreak}
+                onChange={(v) => setDraft({ ...draft, sessionsUntilLongBreak: v })}
+                min={2}
+                max={8}
+              />
+              <Row
+                label="Long break length (min)"
+                value={draft.longBreakMin}
+                onChange={(v) => setDraft({ ...draft, longBreakMin: v })}
+                min={5}
+                max={60}
+              />
+              <Text style={styles.themeSectionLabel}>Theme</Text>
+              <View style={styles.themeRow}>
+                {THEMES.map((t) => {
+                  const selected = t.id === draft.themeId;
+                  return (
+                    <Pressable
+                      key={t.id}
+                      onPress={() => setDraft({ ...draft, themeId: t.id })}
+                      style={styles.themeSwatchWrap}
+                      hitSlop={4}
+                    >
+                      <View
+                        style={[
+                          styles.themeSwatch,
+                          { backgroundColor: t.focus, borderColor: selected ? t.focus : 'transparent' },
+                        ]}
+                      >
+                        <View style={[styles.themeSwatchHalf, { backgroundColor: t.break }]} />
+                      </View>
+                      <Text style={styles.themeSwatchLabel}>{t.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <Pressable onPress={onClose} style={({ pressed }) => [styles.modalBtn, pressed && styles.modalBtnPressed]}>
+                <Text style={styles.modalBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => onSave(draft)}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  { backgroundColor: previewTheme.focus },
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>Save</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Animated.View>
+      </Pressable>
     </Modal>
   );
 }
@@ -713,8 +831,10 @@ const styles = StyleSheet.create({
   settingsBtnText: { color: '#a09e95', fontSize: 13, fontWeight: '500' },
 
   body: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 },
-  modeLabel: { fontSize: 12, letterSpacing: 0.32 * 12, color: '#c75050', marginBottom: 4, fontWeight: '600' },
-  distractionLabel: { fontSize: 11, color: '#6e6c66', marginBottom: 28 },
+  modeLabel: { fontSize: 12, letterSpacing: 0.32 * 12, color: '#c75050', marginBottom: 10, fontWeight: '600' },
+  cycleDots: { flexDirection: 'row', gap: 7, marginBottom: 10 },
+  cycleDot: { width: 6, height: 6, borderRadius: 3 },
+  distractionLabel: { fontSize: 11, color: '#6e6c66', marginBottom: 22 },
   dialWrap: { alignItems: 'center', justifyContent: 'center', marginBottom: 32 },
   dialCenter: {
     position: 'absolute', alignItems: 'center', justifyContent: 'center',
@@ -761,8 +881,10 @@ const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
   modalCard: {
     backgroundColor: '#1f1e24', borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 24, paddingBottom: 36,
+    paddingHorizontal: 24, paddingTop: 10, paddingBottom: 36,
   },
+  grabberWrap: { alignItems: 'center', paddingVertical: 10 },
+  grabber: { width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)' },
   modalTitle: { fontSize: 18, fontWeight: '600', color: '#e8e6df', marginBottom: 16 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#2a292f' },
   rowLabel: { color: '#c1bfb6', fontSize: 15 },
