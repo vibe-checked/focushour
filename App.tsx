@@ -5,6 +5,7 @@ import { useKeepAwake } from 'expo-keep-awake';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
   AppState,
   AppStateStatus,
   Modal,
@@ -36,7 +37,19 @@ type Session = {
 type Config = {
   focusMin: number;
   breakMin: number;
+  themeId: string;
 };
+
+type Theme = { id: string; label: string; bg: string; focus: string; break: string; accent: string };
+
+const THEMES: Theme[] = [
+  { id: 'ember', label: 'Ember', bg: '#16151a', focus: '#c75050', break: '#3a8a8a', accent: '#e8a97f' },
+  { id: 'ocean', label: 'Ocean', bg: '#11181f', focus: '#3b8ac4', break: '#2fa89a', accent: '#7cc4e8' },
+  { id: 'forest', label: 'Forest', bg: '#131c15', focus: '#4c9a4a', break: '#c98a3a', accent: '#8fd17e' },
+  { id: 'grape', label: 'Grape', bg: '#181420', focus: '#9163e6', break: '#e0568f', accent: '#c9a3f0' },
+  { id: 'mono', label: 'Mono', bg: '#141414', focus: '#d8d5cc', break: '#8f8c84', accent: '#bdbab1' },
+];
+const DEFAULT_THEME_ID = 'ember';
 
 Notifications.setNotificationHandler({
   // shouldShowAlert dropped — deprecated in SDK 54; shouldShowBanner +
@@ -49,18 +62,28 @@ Notifications.setNotificationHandler({
   }) as any,
 });
 
+function hexToRgba(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export default function App() {
   useKeepAwake();
-  const [config, setConfig] = useState<Config>({ focusMin: DEFAULT_FOCUS_MIN, breakMin: DEFAULT_BREAK_MIN });
+  const [config, setConfig] = useState<Config>({ focusMin: DEFAULT_FOCUS_MIN, breakMin: DEFAULT_BREAK_MIN, themeId: DEFAULT_THEME_ID });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [mode, setMode] = useState<Mode>('focus');
   const [remainingSec, setRemainingSec] = useState(DEFAULT_FOCUS_MIN * 60);
   const [running, setRunning] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [distractions, setDistractions] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const targetRef = useRef<number | null>(null);
   const notifIdRef = useRef<string | null>(null);
+  const tint = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     (async () => {
@@ -69,9 +92,9 @@ export default function App() {
           AsyncStorage.getItem(STORAGE_KEY_CONFIG),
           AsyncStorage.getItem(STORAGE_KEY_SESSIONS),
         ]);
-        let cfg = { focusMin: DEFAULT_FOCUS_MIN, breakMin: DEFAULT_BREAK_MIN };
+        let cfg: Config = { focusMin: DEFAULT_FOCUS_MIN, breakMin: DEFAULT_BREAK_MIN, themeId: DEFAULT_THEME_ID };
         if (c) {
-          cfg = JSON.parse(c);
+          cfg = { ...cfg, ...JSON.parse(c) };
           setConfig(cfg);
         }
         if (s) setSessions(JSON.parse(s));
@@ -105,6 +128,15 @@ export default function App() {
   }, []);
 
   const totalSec = mode === 'focus' ? config.focusMin * 60 : config.breakMin * 60;
+  const theme = THEMES.find((t) => t.id === config.themeId) ?? THEMES[0];
+
+  useEffect(() => {
+    Animated.timing(tint, {
+      toValue: mode === 'focus' ? 0 : 1,
+      duration: 600,
+      useNativeDriver: false,
+    }).start();
+  }, [mode, tint]);
 
   const cancelScheduledNotif = useCallback(async () => {
     if (notifIdRef.current) {
@@ -169,6 +201,7 @@ export default function App() {
     const target = Date.now() + remainingSec * 1000;
     targetRef.current = target;
     setRunning(true);
+    setDistractions(0);
 
     // Schedule a local notification at the end so the user is alerted even if
     // they background the app or the JS timer is paused.
@@ -228,7 +261,13 @@ export default function App() {
   // paused while we were backgrounded. Reconcile state against wall clock.
   useEffect(() => {
     const onChange = (state: AppStateStatus) => {
-      if (state !== 'active' || !targetRef.current) return;
+      if (state !== 'active') {
+        // A gentle, local-only signal (no tracking sent anywhere) that the
+        // user stepped away mid-focus — surfaced back to them, never logged.
+        if (running && mode === 'focus') setDistractions((d) => d + 1);
+        return;
+      }
+      if (!targetRef.current) return;
       const left = Math.max(0, Math.round((targetRef.current - Date.now()) / 1000));
       setRemainingSec(left);
       if (left <= 0) {
@@ -238,7 +277,29 @@ export default function App() {
     };
     const sub = AppState.addEventListener('change', onChange);
     return () => sub.remove();
-  }, [stopTick, completeSession]);
+  }, [stopTick, completeSession, running, mode]);
+
+  // Consecutive-day streak, with today counted as "still alive" until it ends.
+  const streakDays = useMemo(() => {
+    const daySet = new Set(
+      sessions
+        .filter((s) => s.mode === 'focus')
+        .map((s) => {
+          const d = new Date(s.completedAt);
+          d.setHours(0, 0, 0, 0);
+          return d.getTime();
+        })
+    );
+    const cursor = new Date();
+    cursor.setHours(0, 0, 0, 0);
+    if (!daySet.has(cursor.getTime())) cursor.setDate(cursor.getDate() - 1);
+    let streak = 0;
+    while (daySet.has(cursor.getTime())) {
+      streak++;
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    return streak;
+  }, [sessions]);
 
   // Today's session stats
   const todayCounts = useMemo(() => {
@@ -262,26 +323,50 @@ export default function App() {
   const secs = remainingSec % 60;
   const timeLabel = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 
+  const tintColor = tint.interpolate({
+    inputRange: [0, 1],
+    outputRange: [hexToRgba(theme.focus, 0.05), hexToRgba(theme.break, 0.07)],
+  });
+  const modeColor = mode === 'focus' ? theme.focus : theme.break;
+
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.bg }]}>
       <StatusBar style="light" />
+      <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: tintColor }]} pointerEvents="none" />
 
       <View style={styles.header}>
-        <Text style={styles.brand}>Focus <Text style={styles.brandItalic}>Hour</Text></Text>
-        <Pressable
-          onPress={() => setSettingsOpen(true)}
-          style={({ pressed }) => [styles.settingsBtn, pressed && styles.settingsBtnPressed]}
-          hitSlop={8}
-        >
-          <Text style={styles.settingsBtnText}>Settings</Text>
-        </Pressable>
+        <View>
+          <Text style={styles.brand}>Focus <Text style={[styles.brandItalic, { color: theme.focus }]}>Hour</Text></Text>
+          <Text style={styles.tagline}>quiet · no ads · no tracking</Text>
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+          {streakDays > 0 && (
+            <View style={[styles.streakBadge, { backgroundColor: hexToRgba(theme.accent, 0.16) }]}>
+              <Text style={[styles.streakBadgeText, { color: theme.accent }]}>🔥 {streakDays}</Text>
+            </View>
+          )}
+          <Pressable
+            onPress={() => setSettingsOpen(true)}
+            style={({ pressed }) => [styles.settingsBtn, pressed && styles.settingsBtnPressed]}
+            hitSlop={8}
+          >
+            <Text style={styles.settingsBtnText}>Settings</Text>
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.body}>
-        <Text style={styles.modeLabel}>{mode === 'focus' ? 'FOCUS' : 'BREAK'}</Text>
+        <Text style={[styles.modeLabel, { color: modeColor }]}>{mode === 'focus' ? 'FOCUS' : 'BREAK'}</Text>
+        <Text style={styles.distractionLabel}>
+          {mode === 'focus' && running
+            ? distractions === 0
+              ? 'staying in the zone'
+              : `left the app ${distractions}×`
+            : ' '}
+        </Text>
 
         <View style={styles.dialWrap}>
-          <DialRing progress={progress} mode={mode} />
+          <DialRing progress={progress} mode={mode} theme={theme} />
           <View style={styles.dialCenter} pointerEvents="none">
             <Text style={styles.timeText}>{timeLabel}</Text>
             <Text style={styles.timeSub}>{Math.round(totalSec / 60)} min</Text>
@@ -292,14 +377,14 @@ export default function App() {
           {!running ? (
             <Pressable
               onPress={start}
-              style={({ pressed }) => [styles.primaryBtn, pressed && styles.primaryBtnPressed]}
+              style={({ pressed }) => [styles.primaryBtn, { backgroundColor: theme.focus }, pressed && styles.primaryBtnPressed]}
             >
               <Text style={styles.primaryBtnText}>Start</Text>
             </Pressable>
           ) : (
             <Pressable
               onPress={pause}
-              style={({ pressed }) => [styles.primaryBtn, styles.primaryBtnPause, pressed && styles.primaryBtnPressed]}
+              style={({ pressed }) => [styles.primaryBtn, { backgroundColor: theme.break }, pressed && styles.primaryBtnPressed]}
             >
               <Text style={styles.primaryBtnText}>Pause</Text>
             </Pressable>
@@ -323,6 +408,8 @@ export default function App() {
           <Stat label="Minutes" value={`${todayCounts.totalMin}`} sub="focused" />
           <Stat label="All time" value={`${sessions.filter((s) => s.mode === 'focus').length}`} sub="sessions" />
         </View>
+
+        <Heatmap sessions={sessions} theme={theme} />
       </View>
 
       <SettingsModal
@@ -346,6 +433,63 @@ export default function App() {
   );
 }
 
+/** A GitHub-style contribution heatmap of the last ~10 weeks of focus time. */
+function Heatmap({ sessions, theme }: { sessions: Session[]; theme: Theme }) {
+  const weeks = 10;
+  const minutesByDay = useMemo(() => {
+    const map = new Map<number, number>();
+    sessions
+      .filter((s) => s.mode === 'focus')
+      .forEach((s) => {
+        const d = new Date(s.completedAt);
+        d.setHours(0, 0, 0, 0);
+        const key = d.getTime();
+        map.set(key, (map.get(key) ?? 0) + Math.round(s.durationSec / 60));
+      });
+    return map;
+  }, [sessions]);
+
+  const cols = useMemo(() => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const gridStart = new Date(todayStart);
+    gridStart.setDate(gridStart.getDate() - (weeks * 7 - 1) - todayStart.getDay());
+
+    const grid: (number | null)[][] = [];
+    for (let w = 0; w < weeks + 1; w++) {
+      const col: (number | null)[] = [];
+      for (let d = 0; d < 7; d++) {
+        const cellDate = new Date(gridStart);
+        cellDate.setDate(gridStart.getDate() + w * 7 + d);
+        col.push(cellDate > todayStart ? null : minutesByDay.get(cellDate.getTime()) ?? 0);
+      }
+      grid.push(col);
+    }
+    return grid;
+  }, [minutesByDay]);
+
+  const levelColor = (minutes: number | null) => {
+    if (minutes === null) return 'transparent';
+    if (minutes === 0) return 'rgba(255,255,255,0.06)';
+    if (minutes < 15) return hexToRgba(theme.focus, 0.32);
+    if (minutes < 30) return hexToRgba(theme.focus, 0.58);
+    if (minutes < 60) return hexToRgba(theme.focus, 0.82);
+    return theme.focus;
+  };
+
+  return (
+    <View style={styles.heatmapWrap}>
+      {cols.map((col, i) => (
+        <View key={i} style={styles.heatmapCol}>
+          {col.map((minutes, j) => (
+            <View key={j} style={[styles.heatmapCell, { backgroundColor: levelColor(minutes) }]} />
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
     <View style={styles.stat}>
@@ -361,10 +505,10 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
  * memoized so each render only re-applies backgroundColor based on the
  * filled threshold.
  */
-function DialRing({ progress, mode }: { progress: number; mode: Mode }) {
+function DialRing({ progress, mode, theme }: { progress: number; mode: Mode; theme: Theme }) {
   const size = 280;
   const thickness = 8;
-  const color = mode === 'focus' ? '#c75050' : '#3a8a8a';
+  const color = mode === 'focus' ? theme.focus : theme.break;
   const ticks = useMemo(() => {
     const arr: {
       i: number;
@@ -443,6 +587,7 @@ function SettingsModal({
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState(config);
+  const previewTheme = THEMES.find((t) => t.id === draft.themeId) ?? THEMES[0];
 
   useEffect(() => {
     if (visible) setDraft(config);
@@ -468,6 +613,30 @@ function SettingsModal({
               min={1}
               max={60}
             />
+            <Text style={styles.themeSectionLabel}>Theme</Text>
+            <View style={styles.themeRow}>
+              {THEMES.map((t) => {
+                const selected = t.id === draft.themeId;
+                return (
+                  <Pressable
+                    key={t.id}
+                    onPress={() => setDraft({ ...draft, themeId: t.id })}
+                    style={styles.themeSwatchWrap}
+                    hitSlop={4}
+                  >
+                    <View
+                      style={[
+                        styles.themeSwatch,
+                        { backgroundColor: t.focus, borderColor: selected ? t.focus : 'transparent' },
+                      ]}
+                    >
+                      <View style={[styles.themeSwatchHalf, { backgroundColor: t.break }]} />
+                    </View>
+                    <Text style={styles.themeSwatchLabel}>{t.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
           </ScrollView>
           <View style={styles.modalActions}>
             <Pressable onPress={onClose} style={({ pressed }) => [styles.modalBtn, pressed && styles.modalBtnPressed]}>
@@ -475,7 +644,11 @@ function SettingsModal({
             </Pressable>
             <Pressable
               onPress={() => onSave(draft)}
-              style={({ pressed }) => [styles.modalBtn, styles.modalBtnPrimary, pressed && styles.modalBtnPrimaryPressed]}
+              style={({ pressed }) => [
+                styles.modalBtn,
+                { backgroundColor: previewTheme.focus },
+                pressed && { opacity: 0.85 },
+              ]}
             >
               <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>Save</Text>
             </Pressable>
@@ -529,12 +702,19 @@ const styles = StyleSheet.create({
   },
   brand: { fontSize: 18, fontWeight: '700', color: '#e8e6df', letterSpacing: 0.3 },
   brandItalic: { fontStyle: 'italic', color: '#c75050', fontWeight: '600' },
+  tagline: { fontSize: 9, color: '#5c5a53', letterSpacing: 0.06 * 9, marginTop: 2 },
+  streakBadge: {
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
+    backgroundColor: 'rgba(199,80,80,0.14)',
+  },
+  streakBadgeText: { color: '#e8a97f', fontSize: 13, fontWeight: '600' },
   settingsBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   settingsBtnPressed: { backgroundColor: '#26242c' },
   settingsBtnText: { color: '#a09e95', fontSize: 13, fontWeight: '500' },
 
   body: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 },
-  modeLabel: { fontSize: 12, letterSpacing: 0.32 * 12, color: '#c75050', marginBottom: 32, fontWeight: '600' },
+  modeLabel: { fontSize: 12, letterSpacing: 0.32 * 12, color: '#c75050', marginBottom: 4, fontWeight: '600' },
+  distractionLabel: { fontSize: 11, color: '#6e6c66', marginBottom: 28 },
   dialWrap: { alignItems: 'center', justifyContent: 'center', marginBottom: 32 },
   dialCenter: {
     position: 'absolute', alignItems: 'center', justifyContent: 'center',
@@ -561,6 +741,22 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 10, color: '#7b786f', letterSpacing: 0.2 * 10, marginBottom: 4 },
   statValue: { fontSize: 24, color: '#e8e6df', fontWeight: '400' },
   statSub: { fontSize: 10, color: '#6e6c66', marginTop: 2, letterSpacing: 0.1 * 10 },
+
+  heatmapWrap: { flexDirection: 'row', gap: 3, marginTop: 24 },
+  heatmapCol: { gap: 3 },
+  heatmapCell: { width: 9, height: 9, borderRadius: 2 },
+
+  themeSectionLabel: {
+    fontSize: 11, color: '#7b786f', letterSpacing: 0.2 * 11,
+    marginTop: 20, marginBottom: 10, textTransform: 'uppercase',
+  },
+  themeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 16, paddingBottom: 4 },
+  themeSwatchWrap: { alignItems: 'center', width: 56 },
+  themeSwatch: {
+    width: 36, height: 36, borderRadius: 18, overflow: 'hidden', borderWidth: 2,
+  },
+  themeSwatchHalf: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '50%' },
+  themeSwatchLabel: { fontSize: 10, color: '#a09e95', marginTop: 6 },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
   modalCard: {
