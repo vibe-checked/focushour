@@ -11,7 +11,8 @@
       "bundleIdentifier": "com.markutilitylabs.focushour",
       "buildNumber": "1",
       "infoPlist": {
-        "UIBackgroundModes": []
+        "UIBackgroundModes": [],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
