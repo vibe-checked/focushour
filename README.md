@@ -2,8 +2,8 @@
 
 A quiet, ad-free Pomodoro timer for iPhone. Local notifications, simple stats, no account, no tracking.
 
-- **Support / FAQ:** https://kiddkevin00.github.io/focushour/
-- **Privacy Policy:** https://kiddkevin00.github.io/focushour/privacy.html
+- **Support / FAQ:** https://focushour.vibecode.review/#support
+- **Privacy Policy:** https://focushour.vibecode.review/#privacy
 
 ## Stack
 
@@ -21,7 +21,7 @@ npx expo start --tunnel
 
 - [done] App display name `Focus Hour`, bundle id `com.markutilitylabs.focushour`, version, build number — `app.json`
 - [done] `expo-notifications` plugin configured
-- [done] Privacy + Support URLs live on GitHub Pages (see top)
+- [done] Privacy + Support URLs live on Vercel at focushour.vibecode.review (see top)
 - [you] Apple Developer enrollment, Xcode 17+ or EAS, App Store Connect listing, "Data Not Collected" nutrition label
 
 ## License
