@@ -1,0 +1,8 @@
+node_modules
+ios
+android
+build
+screenshot-kit/raw
+app-store-screenshots
+_support-site-kit
+.git
