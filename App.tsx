@@ -296,14 +296,22 @@ export default function App() {
     stopTick();
     cancelScheduledNotif();
     setRunning(false);
-    // Peek at what completing this session would lead to, without
-    // committing cycle progress — skipping isn't a genuine completion.
-    const nextMode: Mode =
-      mode === 'focus'
-        ? sessionsSinceLongBreak + 1 >= config.sessionsUntilLongBreak
-          ? 'longBreak'
-          : 'break'
-        : 'focus';
+    // Skip doesn't log a session (stats/streak/heatmap only count sessions
+    // that finish naturally), but it still advances the Pomodoro cycle —
+    // otherwise skipping through focus sessions never reaches a long break.
+    let nextMode: Mode;
+    if (mode === 'focus') {
+      const skippedCount = sessionsSinceLongBreak + 1;
+      if (skippedCount >= config.sessionsUntilLongBreak) {
+        nextMode = 'longBreak';
+        setSessionsSinceLongBreak(0);
+      } else {
+        nextMode = 'break';
+        setSessionsSinceLongBreak(skippedCount);
+      }
+    } else {
+      nextMode = 'focus';
+    }
     setMode(nextMode);
     setRemainingSec(durationFor(nextMode));
   }, [mode, config, sessionsSinceLongBreak, durationFor, stopTick, cancelScheduledNotif]);
