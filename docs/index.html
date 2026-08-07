@@ -97,8 +97,8 @@
     .hero-trust span { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; color: rgba(255,255,255,.74); }
     .hero-trust .chk { color: var(--chk); font-weight: 800; }
     .hero-visual { display: flex; justify-content: center; }
-    .hero-shot { width: 300px; max-width: 82vw; border-radius: 30px; overflow: hidden; box-shadow: 0 44px 90px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.08); }
-    .hero-shot img { width: 100%; display: block; aspect-ratio: 660 / 1428; }
+    .hero-shot { width: 280px; max-width: 78vw; background: #0c0c0f; border-radius: 40px; padding: 9px; box-shadow: 0 44px 90px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.08); }
+    .hero-shot img { width: 100%; border-radius: 32px; display: block; aspect-ratio: 660 / 1435; }
 
     .section-label { font-size: 11px; letter-spacing: 2px; font-weight: 700; color: var(--accent); text-transform: uppercase; margin-bottom: 8px; text-align: center; }
     .section-title { font-size: clamp(26px, 4vw, 38px); font-weight: 800; letter-spacing: -0.5px; color: var(--ink); text-align: center; margin-bottom: 10px; }
@@ -226,10 +226,11 @@
         <span><span class="chk">✓</span> No ads</span>
         <span><span class="chk">✓</span> No accounts</span>
         <span><span class="chk">✓</span> No tracking</span>
+        <span><span class="chk">✓</span> No catch</span>
       </div>
     </div>
     <div class="hero-visual">
-      <div class="hero-shot"><img src="gallery/02-hero.jpg" alt="Focus Hour timer screen with a streak badge, session stats, and a focus heatmap" /></div>
+      <div class="hero-shot"><img src="screenshots/timer.png" alt="Focus Hour timer screen with a streak badge, session stats, and a focus heatmap" /></div>
     </div>
   </div>
 </section>
@@ -244,6 +245,8 @@
     <button class="gallery-nav prev" id="galleryPrev" aria-label="Previous screenshots">‹</button>
     <button class="gallery-nav next" id="galleryNext" aria-label="Next screenshots">›</button>
     <div class="gallery-track" id="galleryTrack">
+      <div class="gallery-card"><img src="gallery/01-hero.jpg" alt="Focus Hour — a quiet Pomodoro timer, with the real cycle, streaks, a focus heatmap, and five calming color themes" loading="lazy" /></div>
+      <div class="gallery-card"><img src="gallery/02-hero.jpg" alt="Focus Hour timer screen with a streak badge, session stats, and a focus heatmap" loading="lazy" /></div>
       <div class="gallery-card"><img src="gallery/03-cycle.jpg" alt="A focus session in progress, mid Pomodoro cycle" loading="lazy" /></div>
       <div class="gallery-card"><img src="gallery/04-themes.jpg" alt="Settings screen showing the five color themes" loading="lazy" /></div>
       <div class="gallery-card"><img src="gallery/05-streak.jpg" alt="Streak badge and focus heatmap on the main screen" loading="lazy" /></div>
